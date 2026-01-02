@@ -64,7 +64,7 @@ def posemb_sincos(
 
 
 class Pi0(_model.BaseModel):
-    def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
+    def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs): #rngs is a generator of random numbers
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.pi05 = config.pi05
         paligemma_config = _gemma.get_config(config.paligemma_variant)
@@ -194,7 +194,7 @@ class Pi0(_model.BaseModel):
 
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
-        time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
+        time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001 # beta-distributed time sampling in FM
         time_expanded = time[..., None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions

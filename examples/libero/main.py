@@ -8,6 +8,7 @@ import imageio
 from libero.libero import benchmark
 from libero.libero import get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
+from libero.libero.envs.env_wrapper import ControlEnv
 import numpy as np
 from openpi_client import image_tools
 from openpi_client import websocket_client_policy as _websocket_client_policy
@@ -41,6 +42,7 @@ class Args:
     # Utils
     #################################################################################################################
     video_out_path: str = "data/libero/videos"  # Path to save videos
+    realtime_visualization: bool = True  # Enable real-time on-screen rendering window
 
     seed: int = 7  # Random Seed (for reproducibility)
 
@@ -82,7 +84,7 @@ def eval_libero(args: Args) -> None:
         initial_states = task_suite.get_task_init_states(task_id)
 
         # Initialize LIBERO environment and task description
-        env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed)
+        env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed, args.realtime_visualization)
 
         # Start episodes
         task_episodes, task_successes = 0, 0
@@ -106,6 +108,8 @@ def eval_libero(args: Args) -> None:
                     # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
                     # and we need to wait for them to fall
                     if t < args.num_steps_wait:
+                        if args.realtime_visualization:
+                            env.render()
                         obs, reward, done, info = env.step(LIBERO_DUMMY_ACTION)
                         t += 1
                         continue
@@ -150,6 +154,8 @@ def eval_libero(args: Args) -> None:
                     action = action_plan.popleft()
 
                     # Execute action in environment
+                    if args.realtime_visualization:
+                        env.render()
                     obs, reward, done, info = env.step(action.tolist())
                     if done:
                         task_successes += 1
@@ -186,12 +192,28 @@ def eval_libero(args: Args) -> None:
     logging.info(f"Total episodes: {total_episodes}")
 
 
-def _get_libero_env(task, resolution, seed):
-    """Initializes and returns the LIBERO environment, along with the task description."""
+def _get_libero_env(task, resolution, seed, realtime_visualization=False):
+    """Initializes and returns the LIBERO environment, along with the task description.
+    
+    Args:
+        task: LIBERO task object
+        resolution: Camera resolution
+        seed: Random seed
+        realtime_visualization: If True, enables real-time on-screen rendering window
+    """
     task_description = task.language
     task_bddl_file = pathlib.Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
     env_args = {"bddl_file_name": task_bddl_file, "camera_heights": resolution, "camera_widths": resolution}
-    env = OffScreenRenderEnv(**env_args)
+    
+    if realtime_visualization:
+        # Use ControlEnv with on-screen rendering for real-time visualization
+        env_args["has_renderer"] = True
+        env_args["has_offscreen_renderer"] = True  # Need True to render Robosuite renderer
+        env = ControlEnv(**env_args)
+    else:
+        # Use OffScreenRenderEnv for saving videos (no window)
+        env = OffScreenRenderEnv(**env_args)
+    
     env.seed(seed)  # IMPORTANT: seed seems to affect object positions even when using fixed initial state
     return env, task_description
 

@@ -20,15 +20,18 @@ class Pi0Config(_model.BaseModelConfig):
     dtype: str = "bfloat16"
     paligemma_variant: _gemma.Variant = "gemma_2b"
     action_expert_variant: _gemma.Variant = "gemma_300m"
+    hand_expert_variant: _gemma.Variant = "gemma_300m"
 
     # Set the model specific defaults.
     action_dim: int = 32
-    action_horizon: int = 50
+    action_horizon: int = 20
     max_token_len: int = None  # type: ignore
     # Pi05 has two differences from Pi0:
     # - the state input is part of the discrete language tokens rather than a continuous input that is part of the suffix
     # - the action expert uses adaRMSNorm to inject the flow matching timestep
     pi05: bool = False
+    # Pi0_dex is a variant with dual LLMs (llm and llm_hand) for dexterous manipulation
+    dex: bool = False
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
@@ -47,8 +50,10 @@ class Pi0Config(_model.BaseModelConfig):
 
     @override
     def create(self, rng: at.KeyArrayLike) -> "Pi0":
+        if self.dex:
+            from openpi.models.pi0_dex import Pi0_dex
+            return Pi0_dex(self, rngs=nnx.Rngs(rng))
         from openpi.models.pi0 import Pi0
-
         return Pi0(self, rngs=nnx.Rngs(rng))
 
     @override
@@ -103,6 +108,55 @@ class Pi0Config(_model.BaseModelConfig):
             filters.append(
                 nnx.Not(nnx_utils.PathRegex(".*lora.*")),
             )
+        if not filters:
+            return nnx.Nothing
+        return nnx.All(*filters)
+    
+    def get_freeze_filter_dex(self) -> nnx.filterlib.Filter:
+        """Returns the freeze filter for Pi0_dex model with LoRA fine-tuning of hand expert.
+        
+        For Pi0_dex with combined module [PaliGemma, action_expert, hand_expert]:
+        - Freeze expert 0 (PaliGemma 2B): PaliGemma/llm/... (no suffix)
+        - Freeze expert 2 (hand_expert) base params but allow LoRA: PaliGemma/llm/..._2/... (excluding lora)
+        - Freeze img (image encoder): PaliGemma/img/...
+        - Allow expert 1 (action_expert) to be trainable: PaliGemma/llm/..._1/...
+        - Allow KV transformation MLPs and other trainable components
+        
+        Note: Expert naming in gemma Module:
+        - Expert 0: no suffix (e.g., "attn")
+        - Expert 1: suffix "_1" (e.g., "attn_1")
+        - Expert 2: suffix "_2" (e.g., "attn_2")
+        """
+        filters = []
+        
+        # Freeze expert 0 (PaliGemma 2B) - paths without expert suffix
+        # Match PaliGemma/llm/... but exclude expert 1 and expert 2 paths
+        frozen_llm_base = nnx_utils.PathRegex(".*PaliGemma/llm.*")
+        expert_1_filter = nnx_utils.PathRegex(".*PaliGemma/llm.*_1.*")
+        expert_2_filter = nnx_utils.PathRegex(".*PaliGemma/llm.*_2.*")
+        # Freeze base (expert 0) but not expert 1 or expert 2
+        filters.append(frozen_llm_base)
+        filters.append(nnx.Not(expert_1_filter))  # Don't freeze expert 1
+        filters.append(nnx.Not(expert_2_filter))  # Don't freeze expert 2 (will handle separately)
+        
+        # Freeze the image encoder completely
+        img_filter = nnx_utils.PathRegex(".*PaliGemma/img.*")
+        filters.append(img_filter)
+        
+        # Freeze expert 2 (hand_expert) base params but allow LoRA params
+        # Check hand_expert_variant for "lora" (indicating LoRA fine-tuning of hand_expert)
+        if "lora" in self.hand_expert_variant:
+            hand_expert_base_filter = nnx_utils.PathRegex(".*PaliGemma/llm.*_2.*")
+            filters.append(hand_expert_base_filter)
+            
+            # Exclude LoRA parameters from being frozen (they should be trainable)
+            lora_filter = nnx_utils.PathRegex(".*lora.*")
+            filters.append(nnx.Not(lora_filter))
+        
+        # Also exclude KV transformation MLPs (they should be trainable)
+        kv_transform_filter = nnx_utils.PathRegex(".*kv_transform.*")
+        filters.append(nnx.Not(kv_transform_filter))
+        
         if not filters:
             return nnx.Nothing
         return nnx.All(*filters)

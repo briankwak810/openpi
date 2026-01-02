@@ -6,16 +6,16 @@ import logging
 import pathlib
 from typing import Generic, TypeVar
 
-import augmax
-from flax import nnx
-from flax import struct
-from flax import traverse_util
-import jax
-import jax.numpy as jnp
-import numpy as np
-import orbax.checkpoint as ocp
-import safetensors
-import torch
+import augmax  # Data augmentation library for images, used for on-the-fly random augmentation pipelines.
+from flax import nnx  # Experimental Flax neural network library for building and training neural nets with explicit state management.
+from flax import struct  # Utility for creating immutable dataclasses, useful for configuration and structured JAX objects.
+from flax import traverse_util  # Contains utilities for flattening and traversing nested data structures, often used in model parameter trees.
+import jax  # High-performance numerical computing library that enables transformations like JIT, vmap, and grad for machine learning workloads.
+import jax.numpy as jnp  # JAX's NumPy-compatible array API, providing array and math operations with support for automatic differentiation and JIT compilation.
+import numpy as np  # Standard library for numerical computing with arrays in Python, used for basic array operations and as a bridge to other array formats.
+import orbax.checkpoint as ocp  # Orbax library's checkpoint submodule for saving and loading trained models and arrays safely and efficiently with JAX.
+import safetensors  # Library that provides fast and safe loading/saving of tensors using a simple, secure file format; often used for model weights.
+import torch  # PyTorch deep learning framework, widely used for developing, training, and deploying neural network models, especially in the research community.
 
 from openpi.models_pytorch import pi0_pytorch
 from openpi.shared import image_tools

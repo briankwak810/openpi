@@ -20,13 +20,8 @@ services:
       - CLIENT_ARGS
       - DISPLAY=$DISPLAY
       - MUJOCO_GL=${MUJOCO_GL:-egl}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    devices:
+      - nvidia.com/gpu=all
 
   openpi_server:
     image: openpi_server
@@ -45,10 +40,5 @@ services:
       - IS_DOCKER=true
 
     # Comment out this block if not running on a machine with GPUs.
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    devices:
+      - nvidia.com/gpu=all

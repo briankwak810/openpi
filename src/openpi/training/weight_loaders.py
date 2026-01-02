@@ -75,18 +75,13 @@ class PaliGemmaWeightLoader(WeightLoader):
 
 @dataclasses.dataclass(frozen=True)
 class Pi0DexWeightLoader(WeightLoader):
-    """Loads weights from a pi0 checkpoint for pi0_dex model with combined module.
-    
-    This loader handles the combined module architecture where all three experts are in one module:
-    - Expert 0: PaliGemma (2B, frozen) - loaded from checkpoint's PaliGemma/llm/... (no suffix)
-    - Expert 1: Action expert (300M) - loaded from checkpoint's PaliGemma/llm/..._1/... (same)
-    - Expert 2: Hand expert (300M) - copied from checkpoint's PaliGemma/llm/..._1/... → ..._2/... (change suffix)
+    """Loads weights from a pi0 checkpoint for pi0_dex model.
     
     This loader:
-    1. Loads expert 0 (PaliGemma) and expert 1 (action_expert) directly from checkpoint
-    2. Copies expert 1 weights to expert 2 (hand_expert) by changing _1 suffix to _2
-    3. Handles LoRA parameters (initialized automatically if using LoRA variants)
-    4. Handles KV transformation MLPs (initialized to zero, so not loaded)
+    1. Loads the frozen llm (arm model) from checkpoint's PaliGemma/llm
+    2. Loads llm_hand by copying from checkpoint's PaliGemma/llm (since both use same structure)
+    3. Handles KV transformation MLPs (initialized to zero, so not loaded)
+    4. Handles LoRA parameters (initialized automatically if using LoRA variants)
     """
 
     params_path: str
@@ -100,14 +95,15 @@ class Pi0DexWeightLoader(WeightLoader):
         
         result = {}
         
-        # Step 1: Copy weights that match directly (expert 0, expert 1, img, projections, etc.)
+        # Step 1: Copy weights that match directly (frozen llm, img, projections, etc.)
         for k, v in flat_loaded.items():
             if k in flat_ref:
                 result[k] = v.astype(flat_ref[k].dtype) if v.dtype != flat_ref[k].dtype else v
         
-        # Step 2: Map expert 1 weights (with _1 suffix) to expert 2 (with _2 suffix) for hand expert
-        # The checkpoint has expert 1 (action_expert) with _1 suffix, we need to copy it to expert 2 (hand_expert) with _2 suffix
-        # NOTE: Do NOT map the embedder - expert 2's embedder has width 1024 (300M), while checkpoint's embedder has width 2048 (2B)
+        # Step 2: Map PaliGemma/llm expert weights (with _1 suffix) to PaliGemma/llm_hand in pi0_dex
+        # llm_hand only has the 300M expert (no 2B base), so we only map expert weights (those with _1 suffix)
+        # The expert weights in llm have _1 suffix, but in llm_hand they have no suffix (since it's the first/only expert)
+        # NOTE: Do NOT map the embedder - llm_hand's embedder has width 1024 (300M), while checkpoint's embedder has width 2048 (2B)
         pattern = re.compile(r"^PaliGemma/llm/(.*)$")
         for k, v in flat_loaded.items():
             match = pattern.match(k)
@@ -116,11 +112,12 @@ class Pi0DexWeightLoader(WeightLoader):
                 # Skip embedder - it has different size (1024 vs 2048) and will be initialized fresh
                 if path_suffix.startswith("embedder/"):
                     continue
-                # Only map expert weights (those with _1 suffix) to expert 2 (with _2 suffix)
+                # Only map expert weights (those with _1 suffix) to llm_hand
+                # Remove _1 suffix since llm_hand only has one expert (no suffix)
                 if "_1" in path_suffix:
-                    # Map expert weights: change _1 suffix to _2 for hand expert
-                    new_path = path_suffix.replace("_1", "_2")
-                    new_key = f"PaliGemma/llm/{new_path}"
+                    # Map expert weights: remove _1 suffix
+                    new_path = path_suffix.replace("_1", "")
+                    new_key = f"PaliGemma/llm_hand/{new_path}"
                     if new_key in flat_ref:
                         result[new_key] = v.astype(flat_ref[new_key].dtype) if v.dtype != flat_ref[new_key].dtype else v
         
@@ -143,9 +140,9 @@ class Pi0DexWeightLoader(WeightLoader):
             if k not in result:
                 result[k] = flat_ref[k]
         
-        # Step 6: Add expert 2 embedder from reference (not loaded from checkpoint due to size mismatch)
-        # The embedder will be initialized fresh with the correct 1024 width (300M expert)
-        embedder_pattern = re.compile(r"^PaliGemma/llm/.*_2/embedder/.*$")
+        # Step 6: Add llm_hand embedder from reference (not loaded from checkpoint due to size mismatch)
+        # The embedder will be initialized fresh with the correct 1024 width
+        embedder_pattern = re.compile(r"^PaliGemma/llm_hand/embedder/.*$")
         for k in {k for k in flat_ref if embedder_pattern.fullmatch(k)}:
             if k not in result:
                 result[k] = flat_ref[k]

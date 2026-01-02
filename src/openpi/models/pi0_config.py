@@ -113,41 +113,31 @@ class Pi0Config(_model.BaseModelConfig):
         return nnx.All(*filters)
     
     def get_freeze_filter_dex(self) -> nnx.filterlib.Filter:
-        """Returns the freeze filter for Pi0_dex model with LoRA fine-tuning of hand expert.
+        """Returns the freeze filter for Pi0_dex model with LoRA fine-tuning of llm_hand.
         
-        For Pi0_dex with combined module [PaliGemma, action_expert, hand_expert]:
-        - Freeze expert 0 (PaliGemma 2B): PaliGemma/llm/... (no suffix)
-        - Freeze expert 2 (hand_expert) base params but allow LoRA: PaliGemma/llm/..._2/... (excluding lora)
+        For Pi0_dex:
+        - Freeze llm (frozen arm model): PaliGemma/llm/...
+        - Freeze llm_hand base params but allow LoRA: PaliGemma/llm_hand/... (excluding lora)
         - Freeze img (image encoder): PaliGemma/img/...
-        - Allow expert 1 (action_expert) to be trainable: PaliGemma/llm/..._1/...
         - Allow KV transformation MLPs and other trainable components
         
-        Note: Expert naming in gemma Module:
-        - Expert 0: no suffix (e.g., "attn")
-        - Expert 1: suffix "_1" (e.g., "attn_1")
-        - Expert 2: suffix "_2" (e.g., "attn_2")
+        Note: This checks hand_expert_variant for "lora" to determine if llm_hand should be frozen with LoRA trainable.
         """
         filters = []
         
-        # Freeze expert 0 (PaliGemma 2B) - paths without expert suffix
-        # Match PaliGemma/llm/... but exclude expert 1 and expert 2 paths
-        frozen_llm_base = nnx_utils.PathRegex(".*PaliGemma/llm.*")
-        expert_1_filter = nnx_utils.PathRegex(".*PaliGemma/llm.*_1.*")
-        expert_2_filter = nnx_utils.PathRegex(".*PaliGemma/llm.*_2.*")
-        # Freeze base (expert 0) but not expert 1 or expert 2
-        filters.append(frozen_llm_base)
-        filters.append(nnx.Not(expert_1_filter))  # Don't freeze expert 1
-        filters.append(nnx.Not(expert_2_filter))  # Don't freeze expert 2 (will handle separately)
+        # Freeze the frozen llm (arm model) completely
+        frozen_llm_filter = nnx_utils.PathRegex(".*PaliGemma/llm.*")
+        filters.append(frozen_llm_filter)
         
         # Freeze the image encoder completely
         img_filter = nnx_utils.PathRegex(".*PaliGemma/img.*")
         filters.append(img_filter)
         
-        # Freeze expert 2 (hand_expert) base params but allow LoRA params
-        # Check hand_expert_variant for "lora" (indicating LoRA fine-tuning of hand_expert)
+        # Freeze llm_hand base params but allow LoRA params
+        # Check hand_expert_variant for "lora" (indicating LoRA fine-tuning of llm_hand)
         if "lora" in self.hand_expert_variant:
-            hand_expert_base_filter = nnx_utils.PathRegex(".*PaliGemma/llm.*_2.*")
-            filters.append(hand_expert_base_filter)
+            llm_hand_base_filter = nnx_utils.PathRegex(".*PaliGemma/llm_hand.*")
+            filters.append(llm_hand_base_filter)
             
             # Exclude LoRA parameters from being frozen (they should be trainable)
             lora_filter = nnx_utils.PathRegex(".*lora.*")

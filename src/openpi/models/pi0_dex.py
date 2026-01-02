@@ -71,20 +71,24 @@ class Pi0_dex(_model.BaseModel):
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         hand_expert_config = _gemma.get_config(config.hand_expert_variant) 
         # TODO: rewrite gemma in NNX. For now, use bridge.
-        # COMBINED MODULE: All three experts in one module to reduce JIT compilation memory
-        # Expert 0: PaliGemma (2B, frozen)
-        # Expert 1: Action expert (300M, for arm actions)
-        # Expert 2: Hand expert (300M, LoRA trainable)
         llm = nnx_bridge.ToNNX(
             _gemma.Module(
-                configs=[paligemma_config, action_expert_config, hand_expert_config],
+                configs=[paligemma_config, action_expert_config],
                 embed_dtype=config.dtype,
                 adarms=config.pi05,
             )
         )
-        llm.lazy_init(rngs=rngs, method="init", use_adarms=[False, True, True] if config.pi05 else [False, False, False])
-        # Keep llm_hand as an alias to llm for backward compatibility in code
-        llm_hand = llm
+        llm.lazy_init(rngs=rngs, method="init", use_adarms=[False, True] if config.pi05 else [False, False])
+        # llm_hand only needs the 300M expert - the 2B base comes from frozen llm's KV cache
+        # Use only hand_expert_config since we pass [hand_suffix_tokens] (single expert, no 2B part)
+        llm_hand = nnx_bridge.ToNNX(
+            _gemma.Module(
+                configs=[hand_expert_config],  # Only 300M expert, no 2B base needed
+                embed_dtype=config.dtype,
+                adarms=config.pi05,
+            )
+        )
+        llm_hand.lazy_init(rngs=rngs, method="init", use_adarms=[True] if config.pi05 else [False])
         img = nnx_bridge.ToNNX(
             _siglip.Module(
                 num_classes=paligemma_config.width,
@@ -95,7 +99,7 @@ class Pi0_dex(_model.BaseModel):
             )
         )
         img.lazy_init(next(iter(config.fake_obs().images.values())), train=False, rngs=rngs)
-        self.PaliGemma = nnx.Dict(llm=llm, llm_hand=llm, img=img)  # llm_hand is now same as llm (combined module)
+        self.PaliGemma = nnx.Dict(llm=llm, llm_hand=llm_hand, img=img)
         self.action_in_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
         self.hand_in_proj = nnx.Linear(config.action_dim, hand_expert_config.width, rngs=rngs)
         if config.pi05:
@@ -393,9 +397,8 @@ class Pi0_dex(_model.BaseModel):
         # This is critical: without checkpointing, JAX materializes the entire 2.3B model
         # computation graph during JIT compilation, causing OOM
         def frozen_llm_forward(prefix_tokens, prefix_attn_mask, prefix_positions):
-            # Expert 0: PaliGemma (frozen), Expert 1: action_expert (None), Expert 2: hand_expert (None)
-            outputs, kv_cache = self.PaliGemma.llm(
-                [prefix_tokens, None, None], 
+            _, kv_cache = self.PaliGemma.llm(
+                [prefix_tokens, None], 
                 mask=prefix_attn_mask, 
                 positions=prefix_positions
             )
@@ -434,15 +437,14 @@ class Pi0_dex(_model.BaseModel):
         positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(hand_suffix_mask, axis=-1) - 1
         
         # Use llm_hand with transformed KV cache for hand action inference
-        # Expert 0: PaliGemma (None), Expert 1: action_expert (None), Expert 2: hand_expert (hand_suffix_tokens)
-        outputs, _ = self.PaliGemma.llm_hand(
-            [None, None, hand_suffix_tokens], 
+        # llm_hand only has the 300M expert (no 2B base), so pass just hand_suffix_tokens
+        (hand_suffix_out,), _ = self.PaliGemma.llm_hand(
+            [hand_suffix_tokens], 
             mask=full_attn_mask, 
             positions=positions, 
             kv_cache=kv_cache_transformed,
-            adarms_cond=[None, None, hand_adarms_cond]
+            adarms_cond=[hand_adarms_cond]
         )
-        hand_suffix_out = outputs[2]  # Extract expert 2 output
         
         # Project hand expert outputs to action space
         hand_v_t = self.hand_out_proj(hand_suffix_out[:, -self.action_horizon :])
@@ -477,8 +479,7 @@ class Pi0_dex(_model.BaseModel):
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        # Expert 0: PaliGemma (prefix_tokens), Expert 1: action_expert (None), Expert 2: hand_expert (None)
-        _, kv_cache_frozen = self.PaliGemma.llm([prefix_tokens, None, None], mask=prefix_attn_mask, positions=prefix_positions)
+        _, kv_cache_frozen = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=prefix_positions)
 
         def step(carry):
             x_t, time = carry
@@ -502,16 +503,13 @@ class Pi0_dex(_model.BaseModel):
             # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
             positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(action_suffix_mask, axis=-1) - 1
 
-            # Expert 0: PaliGemma (None), Expert 1: action_expert (action_suffix_tokens), Expert 2: hand_expert (None)
-            outputs, _ = self.PaliGemma.llm(
-                [None, action_suffix_tokens, None],
+            (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+                [None, action_suffix_tokens],
                 mask=full_attn_mask,
                 positions=positions,
                 kv_cache=kv_cache_frozen,  # Reuse cached prefix, don't update
-                adarms_cond=[None, action_adarms_cond, None],
+                adarms_cond=[None, action_adarms_cond],
             )
-            prefix_out = outputs[0]  # Expert 0 output (should be None)
-            suffix_out = outputs[1]  # Expert 1 output (action_expert)
             assert prefix_out is None
             v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
@@ -591,15 +589,13 @@ class Pi0_dex(_model.BaseModel):
             # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
             positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(hand_suffix_mask, axis=-1) - 1
 
-            # Expert 0: PaliGemma (None), Expert 1: action_expert (None), Expert 2: hand_expert (hand_suffix_tokens)
-            outputs, _ = self.PaliGemma.llm_hand(
-                [None, None, hand_suffix_tokens],
+            (suffix_out,), _ = self.PaliGemma.llm_hand(
+                [hand_suffix_tokens],
                 mask=full_attn_mask,
                 positions=positions,
                 kv_cache=kv_cache_transformed,  # Reuse cached prefix, don't update
-                adarms_cond=[None, None, hand_adarms_cond],
+                adarms_cond=[hand_adarms_cond],
             )
-            suffix_out = outputs[2]  # Extract expert 2 output
             
             # Project to action space and get hand actions
             hand_v_t = self.hand_out_proj(suffix_out[:, -self.action_horizon :])
